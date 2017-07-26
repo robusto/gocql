@@ -6,6 +6,7 @@
 package gocql
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -17,8 +18,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"golang.org/x/net/context"
 )
 
 const (
@@ -29,6 +28,7 @@ func TestApprove(t *testing.T) {
 	tests := map[bool]bool{
 		approve("org.apache.cassandra.auth.PasswordAuthenticator"):          true,
 		approve("com.instaclustr.cassandra.auth.SharedSecretAuthenticator"): true,
+		approve("com.datastax.bdp.cassandra.auth.DseAuthenticator"):         true,
 		approve("com.apache.cassandra.auth.FakeAuthenticator"):              false,
 	}
 	for k, v := range tests {
@@ -140,6 +140,106 @@ func newTestSession(addr string, proto protoVersion) (*Session, error) {
 	return testCluster(addr, proto).CreateSession()
 }
 
+func TestDNSLookupConnected(t *testing.T) {
+	log := &testLogger{}
+	Logger = log
+	defer func() {
+		Logger = &defaultLogger{}
+	}()
+
+	srv := NewTestServer(t, defaultProto, context.Background())
+	defer srv.Stop()
+
+	cluster := NewCluster("cassandra1.invalid", srv.Address, "cassandra2.invalid")
+	cluster.ProtoVersion = int(defaultProto)
+	cluster.disableControlConn = true
+
+	// CreateSession() should attempt to resolve the DNS name "cassandraX.invalid"
+	// and fail, but continue to connect via srv.Address
+	_, err := cluster.CreateSession()
+	if err != nil {
+		t.Fatal("CreateSession() should have connected")
+	}
+
+	if !strings.Contains(log.String(), "gocql: dns error") {
+		t.Fatalf("Expected to receive dns error log message  - got '%s' instead", log.String())
+	}
+}
+
+func TestDNSLookupError(t *testing.T) {
+	log := &testLogger{}
+	Logger = log
+	defer func() {
+		Logger = &defaultLogger{}
+	}()
+
+	srv := NewTestServer(t, defaultProto, context.Background())
+	defer srv.Stop()
+
+	cluster := NewCluster("cassandra1.invalid", "cassandra2.invalid")
+	cluster.ProtoVersion = int(defaultProto)
+	cluster.disableControlConn = true
+
+	// CreateSession() should attempt to resolve each DNS name "cassandraX.invalid"
+	// and fail since it could not resolve any dns entries
+	_, err := cluster.CreateSession()
+	if err == nil {
+		t.Fatal("CreateSession() should have returned an error")
+	}
+
+	if !strings.Contains(log.String(), "gocql: dns error") {
+		t.Fatalf("Expected to receive dns error log message  - got '%s' instead", log.String())
+	}
+
+	if err.Error() != "gocql: unable to create session: failed to resolve any of the provided hostnames" {
+		t.Fatalf("Expected CreateSession() to fail with message  - got '%s' instead", err.Error())
+	}
+}
+
+func TestStartupTimeout(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	log := &testLogger{}
+	Logger = log
+	defer func() {
+		Logger = &defaultLogger{}
+	}()
+
+	srv := NewTestServer(t, defaultProto, ctx)
+	defer srv.Stop()
+
+	// Tell the server to never respond to Startup frame
+	atomic.StoreInt32(&srv.TimeoutOnStartup, 1)
+
+	startTime := time.Now()
+	cluster := NewCluster(srv.Address)
+	cluster.ProtoVersion = int(defaultProto)
+	cluster.disableControlConn = true
+	// Set very long query connection timeout
+	// so we know CreateSession() is using the ConnectTimeout
+	cluster.Timeout = time.Second * 5
+
+	// Create session should timeout during connect attempt
+	_, err := cluster.CreateSession()
+	if err == nil {
+		t.Fatal("CreateSession() should have returned a timeout error")
+	}
+
+	elapsed := time.Since(startTime)
+	if elapsed > time.Second*5 {
+		t.Fatal("ConnectTimeout is not respected")
+	}
+
+	if !strings.Contains(err.Error(), "no connections were made when creating the session") {
+		t.Fatalf("Expected to receive no connections error - got '%s'", err)
+	}
+
+	if !strings.Contains(log.String(), "no response to connection startup within timeout") {
+		t.Fatalf("Expected to receive timeout log message  - got '%s'", log.String())
+	}
+
+	cancel()
+}
+
 func TestTimeout(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -207,7 +307,7 @@ func TestQueryRetry(t *testing.T) {
 	requests := atomic.LoadInt64(&srv.nKillReq)
 	attempts := qry.Attempts()
 	if requests != int64(attempts) {
-		t.Fatalf("expected requests %v to match query attemps %v", requests, attempts)
+		t.Fatalf("expected requests %v to match query attempts %v", requests, attempts)
 	}
 
 	// the query will only be attempted once, but is being retried
@@ -454,7 +554,8 @@ func TestQueryTimeoutClose(t *testing.T) {
 }
 
 func TestStream0(t *testing.T) {
-	const expErr = "gocql: received frame on stream 0"
+	// TODO: replace this with type check
+	const expErr = "gocql: received unexpected frame on stream 0"
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -473,8 +574,7 @@ func TestStream0(t *testing.T) {
 		}
 	})
 
-	host := &HostInfo{peer: srv.Address}
-	conn, err := Connect(host, srv.Address, &ConnConfig{ProtoVersion: int(srv.protocol)}, errorHandler, nil)
+	conn, err := Connect(srv.host(), &ConnConfig{ProtoVersion: int(srv.protocol)}, errorHandler, createTestSession())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -509,8 +609,7 @@ func TestConnClosedBlocked(t *testing.T) {
 		t.Log(err)
 	})
 
-	host := &HostInfo{peer: srv.Address}
-	conn, err := Connect(host, srv.Address, &ConnConfig{ProtoVersion: int(srv.protocol)}, errorHandler, nil)
+	conn, err := Connect(srv.host(), &ConnConfig{ProtoVersion: int(srv.protocol)}, errorHandler, createTestSession())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -620,12 +719,13 @@ func NewSSLTestServer(t testing.TB, protocol uint8, ctx context.Context) *TestSe
 }
 
 type TestServer struct {
-	Address    string
-	t          testing.TB
-	nreq       uint64
-	listen     net.Listener
-	nKillReq   int64
-	compressor Compressor
+	Address          string
+	TimeoutOnStartup int32
+	t                testing.TB
+	nreq             uint64
+	listen           net.Listener
+	nKillReq         int64
+	compressor       Compressor
 
 	protocol   byte
 	headerSize int
@@ -635,6 +735,14 @@ type TestServer struct {
 	quit   chan struct{}
 	mu     sync.Mutex
 	closed bool
+}
+
+func (srv *TestServer) host() *HostInfo {
+	host, err := hostInfo(srv.Address, 9042)
+	if err != nil {
+		srv.t.Fatal(err)
+	}
+	return host
 }
 
 func (srv *TestServer) closeWatch() {
@@ -731,6 +839,14 @@ func (srv *TestServer) process(f *framer) {
 
 	switch head.op {
 	case opStartup:
+		if atomic.LoadInt32(&srv.TimeoutOnStartup) > 0 {
+			// Do not respond to startup command
+			// wait until we get a cancel signal
+			select {
+			case <-srv.ctx.Done():
+				return
+			}
+		}
 		f.writeHeader(0, opReady, head.stream)
 	case opOptions:
 		f.writeHeader(0, opSupported, head.stream)

@@ -44,12 +44,12 @@ func (p *position) UnmarshalUDT(name string, info TypeInfo, data []byte) error {
 }
 
 func TestUDT_Marshaler(t *testing.T) {
-	if *flagProto < protoVersion3 {
-		t.Skip("UDT are only available on protocol >= 3")
-	}
-
 	session := createSession(t)
 	defer session.Close()
+
+	if session.cfg.ProtoVersion < protoVersion3 {
+		t.Skip("UDT are only available on protocol >= 3")
+	}
 
 	err := createTable(session, `CREATE TYPE gocql_test.position(
 		lat int,
@@ -100,13 +100,13 @@ func TestUDT_Marshaler(t *testing.T) {
 }
 
 func TestUDT_Reflect(t *testing.T) {
-	if *flagProto < protoVersion3 {
-		t.Skip("UDT are only available on protocol >= 3")
-	}
-
 	// Uses reflection instead of implementing the marshaling type
 	session := createSession(t)
 	defer session.Close()
+
+	if session.cfg.ProtoVersion < protoVersion3 {
+		t.Skip("UDT are only available on protocol >= 3")
+	}
 
 	err := createTable(session, `CREATE TYPE gocql_test.horse(
 		name text,
@@ -147,66 +147,25 @@ func TestUDT_Reflect(t *testing.T) {
 	}
 
 	if *retrievedHorse != *insertedHorse {
-		t.Fatal("exepcted to get %+v got %+v", insertedHorse, retrievedHorse)
+		t.Fatalf("expected to get %+v got %+v", insertedHorse, retrievedHorse)
 	}
 }
 
 func TestUDT_Proto2error(t *testing.T) {
-	if *flagProto < protoVersion3 {
-		t.Skip("UDT are only available on protocol >= 3")
-	}
-
-	cluster := createCluster()
-	cluster.ProtoVersion = 2
-	cluster.Keyspace = "gocql_test"
-
-	// Uses reflection instead of implementing the marshaling type
-	session, err := cluster.CreateSession()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer session.Close()
-
-	err = createTable(session, `CREATE TYPE gocql_test.fish(
-		name text,
-		owner text);`)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	err = createTable(session, `CREATE TABLE gocql_test.fish_race(
-		position int,
-		fish frozen<fish>,
-
-		primary key(position)
-	);`)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	type fish struct {
-		Name  string `cql:"name"`
-		Owner string `cql:"owner"`
-	}
-
-	insertedFish := &fish{
-		Name:  "pony",
-		Owner: "jim",
-	}
-
-	err = session.Query("INSERT INTO fish_race(position, fish) VALUES(?, ?)", 1, insertedFish).Exec()
+	// TODO(zariel): move this to marshal test?
+	_, err := Marshal(NativeType{custom: "org.apache.cassandra.db.marshal.UserType.Type", proto: 2}, 1)
 	if err != ErrorUDTUnavailable {
-		t.Fatalf("expected to get %v got %v", ErrorUDTUnavailable, err)
+		t.Fatalf("expected %v got %v", ErrUnavailable, err)
 	}
 }
 
 func TestUDT_NullObject(t *testing.T) {
-	if *flagProto < protoVersion3 {
-		t.Skip("UDT are only available on protocol >= 3")
-	}
-
 	session := createSession(t)
 	defer session.Close()
+
+	if session.cfg.ProtoVersion < protoVersion3 {
+		t.Skip("UDT are only available on protocol >= 3")
+	}
 
 	err := createTable(session, `CREATE TYPE gocql_test.udt_null_type(
 		name text,
@@ -255,12 +214,12 @@ func TestUDT_NullObject(t *testing.T) {
 }
 
 func TestMapScanUDT(t *testing.T) {
-	if *flagProto < protoVersion3 {
-		t.Skip("UDT are only available on protocol >= 3")
-	}
-
 	session := createSession(t)
 	defer session.Close()
+
+	if session.cfg.ProtoVersion < protoVersion3 {
+		t.Skip("UDT are only available on protocol >= 3")
+	}
 
 	err := createTable(session, `CREATE TYPE gocql_test.log_entry (
 		created_timestamp timestamp,
@@ -342,12 +301,12 @@ func TestMapScanUDT(t *testing.T) {
 }
 
 func TestUDT_MissingField(t *testing.T) {
-	if *flagProto < protoVersion3 {
-		t.Skip("UDT are only available on protocol >= 3")
-	}
-
 	session := createSession(t)
 	defer session.Close()
+
+	if session.cfg.ProtoVersion < protoVersion3 {
+		t.Skip("UDT are only available on protocol >= 3")
+	}
 
 	err := createTable(session, `CREATE TYPE gocql_test.missing_field(
 		name text,
@@ -392,12 +351,12 @@ func TestUDT_MissingField(t *testing.T) {
 }
 
 func TestUDT_EmptyCollections(t *testing.T) {
-	if *flagProto < protoVersion3 {
-		t.Skip("UDT are only available on protocol >= 3")
-	}
-
 	session := createSession(t)
 	defer session.Close()
+
+	if session.cfg.ProtoVersion < protoVersion3 {
+		t.Skip("UDT are only available on protocol >= 3")
+	}
 
 	err := createTable(session, `CREATE TYPE gocql_test.nil_collections(
 		a list<text>,
@@ -448,12 +407,12 @@ func TestUDT_EmptyCollections(t *testing.T) {
 }
 
 func TestUDT_UpdateField(t *testing.T) {
-	if *flagProto < protoVersion3 {
-		t.Skip("UDT are only available on protocol >= 3")
-	}
-
 	session := createSession(t)
 	defer session.Close()
+
+	if session.cfg.ProtoVersion < protoVersion3 {
+		t.Skip("UDT are only available on protocol >= 3")
+	}
 
 	err := createTable(session, `CREATE TYPE gocql_test.update_field_udt(
 		name text,
@@ -505,12 +464,12 @@ func TestUDT_UpdateField(t *testing.T) {
 }
 
 func TestUDT_ScanNullUDT(t *testing.T) {
-	if *flagProto < protoVersion3 {
-		t.Skip("UDT are only available on protocol >= 3")
-	}
-
 	session := createSession(t)
 	defer session.Close()
+
+	if session.cfg.ProtoVersion < protoVersion3 {
+		t.Skip("UDT are only available on protocol >= 3")
+	}
 
 	err := createTable(session, `CREATE TYPE gocql_test.scan_null_udt_position(
 		lat int,
@@ -530,7 +489,7 @@ func TestUDT_ScanNullUDT(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = session.Query("INSERT INTO scan_null_udt_houses(id, name) VALUES(?, ?)", 1, "test" ).Exec()
+	err = session.Query("INSERT INTO scan_null_udt_houses(id, name) VALUES(?, ?)", 1, "test").Exec()
 	if err != nil {
 		t.Fatal(err)
 	}
